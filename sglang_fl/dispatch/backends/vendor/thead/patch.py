@@ -15,11 +15,13 @@
 """T-Head PPU monkey-patches on sglang internals — entrypoint.
 
 Auto-imported by ``sglang_fl.load_plugin()`` (see ``_apply_vendor_patches``).
+Add one ``patch_xxx`` call per concern; put the implementation under ``patches/``.
 """
 
 from .patches.graph_capture_status import patch_graph_capture_status
 from .patches.jit_cuda_arch import patch_jit_cuda_arch
 from .patches.moe_flaggems import patch_moe_flaggems
+from .patches.rs_norm_ag import patch_rs_norm_ag
 from .patches.sgl_kernel_compat import patch_sgl_kernel_compat
 
 _patches_applied = False
@@ -36,6 +38,7 @@ def apply_thead_patches() -> None:
     patch_jit_cuda_arch()
     patch_moe_flaggems()
     patch_graph_capture_status()
+    patch_rs_norm_ag()
 
 
 apply_thead_patches()
