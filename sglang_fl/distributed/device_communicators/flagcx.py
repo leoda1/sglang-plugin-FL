@@ -23,7 +23,8 @@ Adapted from vllm-plugin-FL's PyFlagcxCommunicator pattern:
 Requirements:
   - FLAGCX_PATH env var pointing to FlagCX installation
   - libflagcx.so built at $FLAGCX_PATH/build/lib/
-  - FlagCX Python wrapper at $FLAGCX_PATH/plugin/interservice/flagcx_wrapper.py
+  - FlagCX Python wrapper at $FLAGCX_PATH/src/flagcx/api.py
+    (or $FLAGCX_PATH/plugin/interservice/flagcx_wrapper.py before FlagCX#645)
 
 Usage:
   SGLANG_FL_DIST_BACKEND=flagcx FLAGCX_PATH=/path/to/FlagCX \
@@ -32,6 +33,7 @@ Usage:
 
 import contextlib
 import ctypes
+import importlib.util
 import logging
 import os
 import sys
@@ -42,8 +44,17 @@ import torch.distributed as dist
 logger = logging.getLogger(__name__)
 
 
-def _import_flagcx_wrapper():
-    """Import FlagCX wrapper, adding FLAGCX_PATH to sys.path if needed."""
+_FLAGCX_API_MODULE = "_sglang_fl_flagcx_api"
+
+
+def _load_flagcx_wrapper_module():
+    """Load the FlagCX ctypes wrapper module from FLAGCX_PATH.
+
+    FlagCX moved ``plugin/interservice/flagcx_wrapper.py`` to
+    ``src/flagcx/api.py`` (flagos-ai/FlagCX#645). The new file lives inside
+    the ``flagcx`` package whose ``__init__`` loads the torch backend
+    ``_C.so``, so it is loaded as a standalone module instead.
+    """
     flagcx_path = os.getenv("FLAGCX_PATH")
     if not flagcx_path:
         raise RuntimeError(
@@ -53,25 +64,45 @@ def _import_flagcx_wrapper():
     if not os.path.isdir(flagcx_path):
         raise RuntimeError(f"FLAGCX_PATH={flagcx_path} is not a valid directory.")
 
-    if flagcx_path not in sys.path:
-        sys.path.append(flagcx_path)
+    legacy = os.path.join(flagcx_path, "plugin", "interservice", "flagcx_wrapper.py")
+    if os.path.isfile(legacy):
+        if flagcx_path not in sys.path:
+            sys.path.append(flagcx_path)
+        from plugin.interservice import flagcx_wrapper
 
-    from plugin.interservice.flagcx_wrapper import (
-        FLAGCXLibrary,
-        buffer_type,
-        flagcxComm_t,
-        flagcxDataTypeEnum,
-        flagcxRedOpTypeEnum,
-        flagcxUniqueId,
-    )
+        return flagcx_wrapper
 
+    module = sys.modules.get(_FLAGCX_API_MODULE)
+    if module is not None:
+        return module
+
+    api_file = os.path.join(flagcx_path, "src", "flagcx", "api.py")
+    if not os.path.isfile(api_file):
+        raise ImportError(
+            f"FlagCX Python wrapper not found under FLAGCX_PATH={flagcx_path}: "
+            "expected plugin/interservice/flagcx_wrapper.py or src/flagcx/api.py."
+        )
+    spec = importlib.util.spec_from_file_location(_FLAGCX_API_MODULE, api_file)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[_FLAGCX_API_MODULE] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(_FLAGCX_API_MODULE, None)
+        raise
+    return module
+
+
+def _import_flagcx_wrapper():
+    """Import FlagCX wrapper symbols (supports old and new FlagCX layouts)."""
+    m = _load_flagcx_wrapper_module()
     return (
-        FLAGCXLibrary,
-        buffer_type,
-        flagcxComm_t,
-        flagcxDataTypeEnum,
-        flagcxRedOpTypeEnum,
-        flagcxUniqueId,
+        m.FLAGCXLibrary,
+        m.buffer_type,
+        m.flagcxComm_t,
+        m.flagcxDataTypeEnum,
+        m.flagcxRedOpTypeEnum,
+        m.flagcxUniqueId,
     )
 
 
@@ -220,7 +251,7 @@ class FlagCXCommunicator:
         cached = self._stream_cache.get(handle)
         if cached is not None:
             return cached
-        from plugin.interservice.flagcx_wrapper import flagcxStream_t
+        flagcxStream_t = _load_flagcx_wrapper_module().flagcxStream_t
         new_stream = flagcxStream_t()
         self.flagcx.FLAGCX_CHECK(
             self.flagcx.devHandle.contents.streamCopy(
